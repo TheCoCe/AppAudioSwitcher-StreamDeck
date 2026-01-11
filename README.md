@@ -2,6 +2,7 @@
 
 This StreamDeck plugin allows you to switch the output device for the currently focused app. Simply rotate the dial to select the device and click it to apply.
 It uses the [AppAudioSwitcherUtility](https://github.com/TheCoCe/AppAudioSwitcherUtility) helper I wrote that actually handles the audio devices and process.
+A version of the utility is bundeled in this repo but might not always be up to date.
 
 ## Usage
 
