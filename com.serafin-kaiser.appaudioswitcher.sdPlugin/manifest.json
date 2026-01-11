@@ -1,0 +1,62 @@
+{
+	"Name": "AppAudioSwitcher",
+	"Version": "0.1.0.0",
+	"Author": "Serafin Kaiser",
+	"Actions": [
+		{
+			"Name": "Switch App Audio",
+			"UUID": "com.serafin-kaiser.appaudioswitcher.switchappaudio",
+			"Icon": "imgs/actions/counter/icon",
+			"Tooltip": "Displays the current app and allows to switch it by rotating the dial and then confirming with a dial push.",
+			"PropertyInspectorPath": "ui/switchAppAudio.html",
+			"Controllers": ["Encoder"],
+			"Encoder": {
+				"layout": "$A1",
+				"TriggerDescription": {
+					"Push": "Apply device",
+					"Rotate": "Switch device"
+				}
+			},
+			"States": [
+				{
+					"Image": "imgs/actions/counter/key",
+					"TitleAlignment": "middle"
+				}
+			]
+		},
+		{
+			"Name": "TestAction",
+			"UUID": "com.serafin-kaiser.appaudioswitcher.testaction",
+			"Icon": "imgs/actions/counter/icon",
+			"Tooltip": "A test action",
+			"PropertyInspectorPath": "ui/testAction.html",
+			"Controllers": ["Keypad"],
+			"States": [
+				{
+					"Image": "imgs/actions/counter/key",
+					"TitleAlignment": "middle"
+				}
+			]
+		}
+	],
+	"Category": "AppAudioSwitcher",
+	"CategoryIcon": "imgs/plugin/category-icon",
+	"CodePath": "bin/plugin.js",
+	"Description": "A plugin that can switch audio devices of the focused app",
+	"Icon": "imgs/plugin/marketplace",
+	"SDKVersion": 3,
+	"Software": {
+		"MinimumVersion": "6.9"
+	},
+	"OS": [
+		{
+			"Platform": "windows",
+			"MinimumVersion": "10"
+		}
+	],
+	"Nodejs": {
+		"Version": "20",
+		"Debug": "enabled"
+	},
+	"UUID": "com.serafin-kaiser.appaudioswitcher"
+}
