@@ -28,9 +28,10 @@ type DevicesPayload = {
 }
 
 type FocusedPayload = {
-	processId: string,
+	processId: number,
 	processName: string,
 	deviceId: string,
+	playsSound: boolean
 	processIconBase64?: string
 }
 
@@ -41,7 +42,7 @@ type FocusedPayload = {
 export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 	private curDevices: Array<{ Id: string, Name: string }> = new Array();
 	private timer: NodeJS.Timeout | undefined;
-	private curProcessId: number = 0;
+	private processInfo: FocusedPayload | undefined;
 	private forceProcessUpdate: boolean = false;
 
 	// --- Utils Server ---
@@ -176,26 +177,20 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 	async handleFocusedMessageReceived(focusedPayload: FocusedPayload) {
 		if(focusedPayload === undefined) return;
 
-		let newProcessId = 0;
-		try {
-			newProcessId = Number.parseInt(focusedPayload.processId);
-		}
-		catch {
-			return;
-		}
-
-		if((newProcessId !== this.curProcessId && newProcessId !== 0) || this.forceProcessUpdate)
+		if((focusedPayload.processId !== this.processInfo?.processId && focusedPayload.processId !== 0) || this.forceProcessUpdate)
 		{
 			this.forceProcessUpdate = false;
-			this.curProcessId = newProcessId;
+			this.processInfo = focusedPayload;
+
 			for (const action of this.actions) {
-				action.setTitle(focusedPayload.processName);
+				action.setTitle(this.processInfo.processName);
 				if(action.isDial())
 				{
-					if(focusedPayload.deviceId !== '') {
-						await this.trySetCurSelectedDeviceId(action, focusedPayload.deviceId);
-						this.updateDialLayout(action);
+					if(this.processInfo.deviceId !== '') {
+						await this.trySetCurSelectedDeviceId(action, this.processInfo.deviceId);
 					}
+
+					this.updateDialLayout(action);
 				}
 			}
 			this.sendMessage("--get focused --icon");
@@ -222,7 +217,7 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 		}); 
 	}
 
-	private async updateProcessIds(force: boolean = false) {
+	private async updateProcessInfo(force: boolean = false) {
 		if(force) {
 			this.forceProcessUpdate = true;
 		}
@@ -236,7 +231,7 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 		}
 
 		this.timer = setInterval(() => {
-			this.updateProcessIds();
+			this.updateProcessInfo();
 		}, 1000);
 	}
 
@@ -244,9 +239,16 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 		// Update 
 		const deviceInfo = await this.getCurDeviceForAction(action);
 
-		action.setFeedback({
-			value: deviceInfo?.Name.toString() ?? "None",
-		});
+		if(this.processInfo?.playsSound) {
+			action.setFeedback({
+				value: deviceInfo?.Name.toString() ?? "None",
+			});
+		}
+		else {
+			action.setFeedback({
+				value: "-",
+			})
+		}
 	}
 
 	private async getActionDeviceData(action: DialAction<SoundSwitchSettings> | KeyAction<SoundSwitchSettings>): Promise<ActionDeviceInfo|null>
@@ -320,7 +322,7 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 		}
 
 		// Update once immediately
-		this.updateProcessIds(true);
+		this.updateProcessInfo(true);
 		// Set a timer for this action if it doesn't have one yet
 		this.tryStartProcessUpdateTimer(); 
 	}
@@ -358,7 +360,7 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 	override async onDialDown(ev: DialDownEvent<SoundSwitchSettings>): Promise<void> {
 		const device = await this.getCurDeviceForAction(ev.action);
 		if(device) {
-			const res = await this.execAwait(`audioSwitcherUtil\\AppAudioSwitcherUtility.exe --set appDevice --process ${this.curProcessId.toString()} --device ${device.Id}`);
+			const res = await this.execAwait(`audioSwitcherUtil\\AppAudioSwitcherUtility.exe --set appDevice --process ${this.processInfo?.processId} --device ${device.Id}`);
 			if(res.error) {
 				streamDeck.logger.error(res.error);
 			}
