@@ -103,7 +103,7 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 		return true;
 	}
 
-	async tryConnectToUtilsServer(): Promise<void> {
+	async tryConnectToUtilsServer(skipLaunch: boolean = false): Promise<void> {
 		return new Promise<void>(async (resolve, reject) => {
 			if(this.isConnected())
 			{
@@ -111,7 +111,7 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 				return;
 			}
 
-			this.tryLaunchUtilsServer().then(() => {
+			const connectHandler = () => {
 				if(this.client !== null) {
 					this.client.end();
 					this.client = null;
@@ -132,14 +132,27 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 					this.endUtilsServer();
 					reject(e);
 				}
-			}, (e) => {
-				reject(e);
-			});
+			}
+			
+			if(skipLaunch) {
+				connectHandler();
+			}
+			else 
+			{
+				this.tryLaunchUtilsServer().then(() => {
+					connectHandler();
+				}, (e) => {
+					reject(e);
+				});
+			}
 		});
 	}
 
 	async sendMessage(message: string) {
-		await this.tryConnectToUtilsServer();
+		await this.tryConnectToUtilsServer(true);
+		if(this.client === undefined) {
+			streamDeck.logger.debug("Fail!");
+		}
 		streamDeck.logger.debug(`Sending Message: ${message}`);
 		this.client?.write(message);
 	}
@@ -158,13 +171,14 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 
 		switch (response.id) {
 			case "devices": {
-				this.handleDevicesMessageReceived(response.payload as DevicesPayload);
+				await this.handleDevicesMessageReceived(response.payload as DevicesPayload);
+				break;
 			}
-			case "focused": {
+			case "focused":
+			case "icon":
+			{
 				await this.handleFocusedMessageReceived(response.payload as FocusedPayload);
-			}
-			case "icon": {
-				await this.handleFocusedIconMessageReceived(response.payload as FocusedPayload);
+				break;
 			}
 		}
 	}
@@ -172,6 +186,8 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 	async handleDevicesMessageReceived(devicesPayload: DevicesPayload) {
 		this.curDevices = devicesPayload.devices ?? [];
 		streamDeck.logger.info(devicesPayload);
+		// After receiving devices, immediately update process
+		await this.sendMessage("--get focused --icon");
 	}
 
 	async handleFocusedMessageReceived(focusedPayload: FocusedPayload) {
@@ -190,22 +206,16 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 						await this.trySetCurSelectedDeviceId(action, this.processInfo.deviceId);
 					}
 
-					this.updateDialLayout(action);
+					this.updateDialLayout(action).then();
+
+					if(focusedPayload.processIconBase64 !== undefined) {
+						action.setFeedback({
+							icon: `data:image/png;base64,${focusedPayload.processIconBase64}`
+						}).then()
+					}
 				}
 			}
-			this.sendMessage("--get focused --icon");
 		}
-	}
-
-	async handleFocusedIconMessageReceived(focusedPayload: FocusedPayload) {
-		for (const action of this.actions) {
-			if(action.isDial())
-			{
-				action.setFeedback({
-					icon: `data:image/png;base64,${focusedPayload.processIconBase64}`
-				})
-			}
-		} 
 	}
 
 	async execAwait(cmd: string): Promise<{ error: ExecException|null; stdout: string; stderr: string }> 
@@ -217,35 +227,17 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 		}); 
 	}
 
-	private async updateProcessInfo(force: boolean = false) {
-		if(force) {
-			this.forceProcessUpdate = true;
-		}
-		this.sendMessage("--get focused");
-	}
-
-	private async tryStartProcessUpdateTimer() {
-		if(this.timer)
-		{
-			return;
-		}
-
-		this.timer = setInterval(() => {
-			this.updateProcessInfo();
-		}, 1000);
-	}
-
 	private async updateDialLayout(action: DialAction<SoundSwitchSettings>) {
 		// Update 
 		const deviceInfo = await this.getCurDeviceForAction(action);
 
 		if(this.processInfo?.playsSound) {
-			action.setFeedback({
+			await action.setFeedback({
 				value: deviceInfo?.Name.toString() ?? "None",
 			});
 		}
 		else {
-			action.setFeedback({
+			await action.setFeedback({
 				value: "-",
 			})
 		}
@@ -289,6 +281,10 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 	private async cycleDeviceIndexForAction(action: DialAction<SoundSwitchSettings> | KeyAction<SoundSwitchSettings>, incr: boolean) {
 		let actionDeviceInfo = await this.getActionDeviceData(action);
 		if(actionDeviceInfo === null) return;
+		if(actionDeviceInfo.devices.length == 0) {
+			streamDeck.logger.info("No devices to switch to!");
+			return;
+		}
 
 		let idx = actionDeviceInfo.curDeviceIdx;
 		idx = idx + (incr ? 1 : -1);
@@ -310,21 +306,14 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 	 */
 	override async onWillAppear(ev: WillAppearEvent<SoundSwitchSettings>): Promise<void> {
 		try {
-			this.sendMessage("--get devices");
+			await this.tryConnectToUtilsServer();
 		}
 		catch (e) {
 			streamDeck.logger.error(e);
 			return;
 		}
 
-		if(ev.action.isDial()) {
-			this.updateDialLayout(ev.action);
-		}
-
-		// Update once immediately
-		this.updateProcessInfo(true);
-		// Set a timer for this action if it doesn't have one yet
-		this.tryStartProcessUpdateTimer(); 
+		await this.sendMessage("--get devices");
 	}
 
 	override onWillDisappear(ev: WillDisappearEvent<SoundSwitchSettings>): Promise<void> | void {
