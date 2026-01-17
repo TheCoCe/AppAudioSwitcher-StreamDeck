@@ -7,14 +7,31 @@ import { GlobalSettings, SoundSwitchSettings } from "../settings";
 import { Socket } from "net";
 import path from "path";
 
-type Device = {
+enum DeviceState {
+	ACTIVE = 0x00000001,
+	DISABLED = 0x00000002,
+	NOTPRESENT = 0x00000004,
+	UNPLUGGED = 0x00000008,
+	MASK_ALL = 0x0000000f
+}
+
+enum DataFlow {
+	eRender = 0,
+	eCapture = 1,
+	eAll = 2,
+	eCount = 3
+}
+
+type AudioDevice = {
 	Id: string,
 	Name: string
+	State: DeviceState
+	Flow: DataFlow
 }
 
 type ActionDeviceInfo = {
 	settings: SoundSwitchSettings,
-	devices: Device[],
+	devices: AudioDevice[],
 	curDeviceIdx: number
 }
 
@@ -24,14 +41,14 @@ type Response = {
 }
 
 type DevicesPayload = {
-	devices: Device[]
+	devices: AudioDevice[]
 }
 
 type FocusedPayload = {
 	processId: number,
 	processName: string,
 	deviceId: string,
-	playsSound: boolean
+	hasSession: boolean
 	processIconBase64?: string
 }
 
@@ -40,7 +57,7 @@ type FocusedPayload = {
  */
 @action({ UUID: "com.serafin-kaiser.appaudioswitcher.switchappaudio" })
 export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
-	private curDevices: Array<{ Id: string, Name: string }> = new Array();
+	private curDevices: Array<AudioDevice> = new Array();
 	private timer: NodeJS.Timeout | undefined;
 	private processInfo: FocusedPayload | undefined;
 	private forceProcessUpdate: boolean = false;
@@ -193,10 +210,21 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 	async handleFocusedMessageReceived(focusedPayload: FocusedPayload) {
 		if(focusedPayload === undefined) return;
 
-		if((focusedPayload.processId !== this.processInfo?.processId && focusedPayload.processId !== 0) || this.forceProcessUpdate)
+		if(((focusedPayload.processId !== this.processInfo?.processId 
+			|| focusedPayload.hasSession !== this.processInfo.hasSession 
+			|| focusedPayload.deviceId !== this.processInfo.deviceId) 
+			&& focusedPayload.processId !== 0) 
+			|| this.forceProcessUpdate)
 		{
 			this.forceProcessUpdate = false;
-			this.processInfo = focusedPayload;
+			this.processInfo = {
+				processId: focusedPayload.processId,
+				processName: focusedPayload.processName,
+				deviceId: focusedPayload.deviceId,
+				hasSession: focusedPayload.hasSession,
+				// icon is only sent when the process changes, updates do not include it, so make sure to preserve the icon when updates for the process come in
+				processIconBase64: this.processInfo?.processId == focusedPayload.processId && !focusedPayload.processIconBase64 ? this.processInfo.processIconBase64 : focusedPayload.processIconBase64
+			};
 
 			for (const action of this.actions) {
 				action.setTitle(this.processInfo.processName);
@@ -231,7 +259,7 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 		// Update 
 		const deviceInfo = await this.getCurDeviceForAction(action);
 
-		if(this.processInfo?.playsSound) {
+		if(this.processInfo?.hasSession || this.processInfo?.deviceId !== "") {
 			await action.setFeedback({
 				value: deviceInfo?.Name.toString() ?? "None",
 			});
@@ -243,17 +271,17 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 		}
 	}
 
-	private async getActionDeviceData(action: DialAction<SoundSwitchSettings> | KeyAction<SoundSwitchSettings>): Promise<ActionDeviceInfo|null>
+	private async getActionDeviceData(action: DialAction<SoundSwitchSettings> | KeyAction<SoundSwitchSettings>, filter: DeviceState = DeviceState.MASK_ALL): Promise<ActionDeviceInfo|null>
 	{
 		if(action === undefined) return null;
 		const settings = await action?.getSettings();
 		if(settings === undefined) return null;
-		const devicesForAction = this.curDevices.filter((d) => settings.activeDevices?.includes(d.Id));
+		const devicesForAction = this.curDevices.filter((d) => settings.activeDevices?.includes(d.Id) && d.State & filter);
 		let deviceIndex = devicesForAction.findIndex((d) => (d.Id === settings.curSelectedDeviceId));
 		return { settings: settings, devices: devicesForAction, curDeviceIdx: deviceIndex };
 	}
 
-	private async getCurDeviceForAction(action: DialAction<SoundSwitchSettings> | KeyAction<SoundSwitchSettings>): Promise<Device|undefined> {
+	private async getCurDeviceForAction(action: DialAction<SoundSwitchSettings> | KeyAction<SoundSwitchSettings>): Promise<AudioDevice|undefined> {
 		const actionDeviceInfo = await this.getActionDeviceData(action);
 		if(actionDeviceInfo === null) return undefined;
 
@@ -279,7 +307,7 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 	}
 
 	private async cycleDeviceIndexForAction(action: DialAction<SoundSwitchSettings> | KeyAction<SoundSwitchSettings>, incr: boolean) {
-		let actionDeviceInfo = await this.getActionDeviceData(action);
+		let actionDeviceInfo = await this.getActionDeviceData(action, DeviceState.ACTIVE);
 		if(actionDeviceInfo === null) return;
 		if(actionDeviceInfo.devices.length == 0) {
 			streamDeck.logger.info("No devices to switch to!");
@@ -306,7 +334,7 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 	 */
 	override async onWillAppear(ev: WillAppearEvent<SoundSwitchSettings>): Promise<void> {
 		try {
-			await this.tryConnectToUtilsServer();
+			await this.tryConnectToUtilsServer(true);
 		}
 		catch (e) {
 			streamDeck.logger.error(e);
@@ -356,26 +384,36 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 		}
 	}
 
+	override async onDidReceiveSettings(ev: DidReceiveSettingsEvent<SoundSwitchSettings>): Promise<void> {
+		const settings = await ev.action.getSettings<SoundSwitchSettings>();
+		streamDeck.ui.sendToPropertyInspector({
+				event: "getProducts",
+				items: this.#getAvailableDevices(settings.showInactive),
+			} satisfies DataSourcePayload);
+	}
+
 	/**
 	 * Listen for messages from the property inspector.
 	 * @param ev Event information.
 	 */
-	override onSendToPlugin(ev: SendToPluginEvent<JsonValue, SoundSwitchSettings>): Promise<void> | void {
+	override async onSendToPlugin(ev: SendToPluginEvent<JsonValue, SoundSwitchSettings>): Promise<void> {
 		// Check if the payload is requesting a data source, i.e. the structure is { event: string }
 		if (ev.payload instanceof Object && "event" in ev.payload && ev.payload.event === "getProducts") {
+			const settings = await ev.action.getSettings<SoundSwitchSettings>();
 			// Send the product ranges to the property inspector.
 			streamDeck.ui.sendToPropertyInspector({
 				event: "getProducts",
-				items: this.#getAvailableDevices(),
+				items: this.#getAvailableDevices(settings.showInactive),
 			} satisfies DataSourcePayload);
 		}
 	}
 
-	#getAvailableDevices(): DataSourceResult {
-		let array = this.curDevices.map((device) => 
+	#getAvailableDevices(showInactive: boolean): DataSourceResult {
+		const devices = showInactive ? this.curDevices : this.curDevices.filter((d) => d.State & DeviceState.ACTIVE);
+		let array = devices.map((device) => 
 			({ 
 				value: device.Id,
-			 	label: device.Name
+			 	label: showInactive ? `${device.Name} - ${DeviceState[device.State]}` : device.Name
 			}))
 		return array;
 	}

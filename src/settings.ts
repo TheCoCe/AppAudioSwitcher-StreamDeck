@@ -10,6 +10,7 @@ export type SoundSwitchSettings = {
 	incrementBy?: number;
 	curSelectedDeviceId?: string;
 	activeDevices?: string[];
+	showInactive: boolean;
 };
 
 export type TestActionSettings = {
