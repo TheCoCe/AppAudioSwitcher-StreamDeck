@@ -334,7 +334,7 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 	 */
 	override async onWillAppear(ev: WillAppearEvent<SoundSwitchSettings>): Promise<void> {
 		try {
-			await this.tryConnectToUtilsServer(true);
+			await this.tryConnectToUtilsServer();
 		}
 		catch (e) {
 			streamDeck.logger.error(e);
