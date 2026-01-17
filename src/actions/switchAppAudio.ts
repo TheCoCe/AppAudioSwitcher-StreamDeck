@@ -384,8 +384,12 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 		}
 	}
 
-	override async onDidReceiveSettings(ev: DidReceiveSettingsEvent<SoundSwitchSettings>): Promise<void> {
-		const settings = await ev.action.getSettings<SoundSwitchSettings>();
+	/** This is needed because action.getSettings will cause a call to onDidReceiveSettings	which will cause a loop if not suppressed. */
+	private supressSettingChanged: boolean = false;
+
+	override onDidReceiveSettings(ev: DidReceiveSettingsEvent<SoundSwitchSettings>): Promise<void> | void {
+		if(this.supressSettingChanged) return;
+		const settings = ev.payload.settings;
 		streamDeck.ui.sendToPropertyInspector({
 				event: "getProducts",
 				items: this.#getAvailableDevices(settings.showInactive),
@@ -399,7 +403,9 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 	override async onSendToPlugin(ev: SendToPluginEvent<JsonValue, SoundSwitchSettings>): Promise<void> {
 		// Check if the payload is requesting a data source, i.e. the structure is { event: string }
 		if (ev.payload instanceof Object && "event" in ev.payload && ev.payload.event === "getProducts") {
+			this.supressSettingChanged = true;
 			const settings = await ev.action.getSettings<SoundSwitchSettings>();
+			this.supressSettingChanged = false;
 			// Send the product ranges to the property inspector.
 			streamDeck.ui.sendToPropertyInspector({
 				event: "getProducts",
