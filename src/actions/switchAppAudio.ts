@@ -210,12 +210,13 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 	async handleFocusedMessageReceived(focusedPayload: FocusedPayload) {
 		if(focusedPayload === undefined) return;
 
-		if(((focusedPayload.processId !== this.processInfo?.processId 
+		const shouldUpdate = focusedPayload.processId !== this.processInfo?.processId 
 			|| focusedPayload.hasSession !== this.processInfo.hasSession 
-			|| focusedPayload.deviceId !== this.processInfo.deviceId) 
-			&& focusedPayload.processId !== 0) 
-			|| this.forceProcessUpdate)
-		{
+			|| focusedPayload.deviceId !== this.processInfo.deviceId 
+			|| (focusedPayload.processIconBase64 && focusedPayload.processIconBase64 != this.processInfo?.processIconBase64)
+			&& focusedPayload.processId !== 0 || this.forceProcessUpdate;
+
+		if(shouldUpdate) {
 			this.forceProcessUpdate = false;
 			this.processInfo = {
 				processId: focusedPayload.processId,
@@ -341,7 +342,10 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 			return;
 		}
 
-		await this.sendMessage("--get devices");
+		this.sendMessage("--get devices");
+		// Make sure the next process update will be applied, otherwise icon won't be set properly
+		this.forceProcessUpdate = true;
+		this.sendMessage("--get focused --icon");
 	}
 
 	override onWillDisappear(ev: WillDisappearEvent<SoundSwitchSettings>): Promise<void> | void {

@@ -9,7 +9,9 @@
 			"Icon": "imgs/actions/counter/icon",
 			"Tooltip": "Displays the current app and allows to switch it by rotating the dial and then confirming with a dial push.",
 			"PropertyInspectorPath": "ui/switchAppAudio.html",
-			"Controllers": ["Encoder"],
+			"Controllers": [
+				"Encoder"
+			],
 			"Encoder": {
 				"layout": "$A1",
 				"TriggerDescription": {
