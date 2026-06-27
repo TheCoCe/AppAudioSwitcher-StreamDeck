@@ -68,6 +68,8 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 	private utilsServerProcess: ChildProcess | null = null;
 	private client: Socket | null = null;
 
+	private static readonly MsgDelimiter = "\0";
+
 	async tryLaunchUtilsServer(restart: boolean = false): Promise<void> {
 		if(restart) {
 			this.endUtilsServer();
@@ -138,8 +140,17 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 
 				this.client = new Socket();
 
+				let receiveBuffer = "";
+
 				this.client.on("data", (data) => {
-					this.messageReceived(data.toString());
+					receiveBuffer += data.toString("utf8");
+
+					let delimiterIndex;
+					while ((delimiterIndex = receiveBuffer.indexOf(SwitchAppAudioAction.MsgDelimiter)) !== -1) {
+						const message = receiveBuffer.slice(0, delimiterIndex);
+						this.messageReceived(message);
+						receiveBuffer = receiveBuffer.slice(delimiterIndex + 1);
+					}
 				})
  
 				try {
@@ -173,8 +184,7 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 			streamDeck.logger.debug("Fail!");
 		}
 
-		const delimiter = "\0";
-		const payload = message.endsWith(delimiter) ? message : message + delimiter;
+		const payload = message.endsWith(SwitchAppAudioAction.MsgDelimiter) ? message : message + SwitchAppAudioAction.MsgDelimiter;
 		streamDeck.logger.debug(`Sending Message: ${message}`);
 		this.client?.write(payload);
 	}
