@@ -2,10 +2,11 @@ import streamDeck, { Action, action, DialRotateEvent, DidReceiveSettingsEvent, K
 import { JsonValue } from "@elgato/utils";
 import type { DataSourcePayload, DataSourceResult } from "../sdpi";
 import type { DialAction, DialDownEvent, KeyAction } from "@elgato/streamdeck";
-import { ChildProcess, exec, ExecException, spawn } from 'child_process';
+import { ChildProcess, exec, ExecException, spawn } from "child_process";
 import { GlobalSettings, SoundSwitchSettings } from "../settings";
 import { Socket } from "net";
 import path from "path";
+import { fileURLToPath } from "url";
 
 enum DeviceState {
 	ACTIVE = 0x00000001,
@@ -84,7 +85,8 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 			}, 5000);
 
 			try {
-				this.utilsServerProcess = spawn(path.join(import.meta.dirname + "\\..\\audioSwitcherUtil\\AppAudioSwitcherUtility.exe"), ["--server"]);
+				const executablePath = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "audioSwitcherUtil", "AppAudioSwitcherUtility.exe");
+				this.utilsServerProcess = spawn(executablePath, ["--server"]);
 				this.utilsServerProcess.stdout?.on("data", (data) => {
 					const text = data.toString();
 					if(text.includes("Listening on port")) {
@@ -170,8 +172,11 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 		if(this.client === undefined) {
 			streamDeck.logger.debug("Fail!");
 		}
+
+		const delimiter = "\0";
+		const payload = message.endsWith(delimiter) ? message : message + delimiter;
 		streamDeck.logger.debug(`Sending Message: ${message}`);
-		this.client?.write(message);
+		this.client?.write(payload);
 	}
 
 	async messageReceived(message: string) {
@@ -342,6 +347,7 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 			return;
 		}
 
+		this.sendMessage("Bla bla bla");
 		this.sendMessage("--get devices");
 		// Make sure the next process update will be applied, otherwise icon won't be set properly
 		this.forceProcessUpdate = true;
