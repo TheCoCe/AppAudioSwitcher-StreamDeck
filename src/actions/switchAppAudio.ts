@@ -7,66 +7,24 @@ import { GlobalSettings, SoundSwitchSettings } from "../settings";
 import { Socket } from "net";
 import path from "path";
 import { fileURLToPath } from "url";
-
-enum DeviceState {
-	ACTIVE = 0x00000001,
-	DISABLED = 0x00000002,
-	NOTPRESENT = 0x00000004,
-	UNPLUGGED = 0x00000008,
-	MASK_ALL = 0x0000000f
-}
-
-enum DataFlow {
-	eRender = 0,
-	eCapture = 1,
-	eAll = 2,
-	eCount = 3
-}
-
-type AudioDevice = {
-	Id: string,
-	Name: string
-	State: DeviceState
-	Flow: DataFlow
-}
-
-type ActionDeviceInfo = {
-	settings: SoundSwitchSettings,
-	devices: AudioDevice[],
-	curDeviceIdx: number
-}
-
-type Response = {
-	id: string,
-	payload: Object
-}
-
-type DevicesPayload = {
-	devices: AudioDevice[]
-}
-
-type FocusedPayload = {
-	processId: number,
-	processName: string,
-	deviceId: string,
-	hasSession: boolean
-	processIconBase64?: string
-}
+import * as UtilTypes from "../audioSwitcherUtilTypes";
+import { AudioSwitcherUtilClient } from "../audioSwitcherUtilClient";
 
 /**
  * An example action class that displays a count that increments by one each time the button is pressed.
  */
 @action({ UUID: "com.serafin-kaiser.appaudioswitcher.switchappaudio" })
 export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
-	private curDevices: Array<AudioDevice> = new Array();
+	private curDevices: Array<UtilTypes.DeviceInfo> = new Array();
 	private timer: NodeJS.Timeout | undefined;
-	private processInfo: FocusedPayload | undefined;
+	private processInfo: UtilTypes.FocusedMessageResponse | undefined;
 	private forceProcessUpdate: boolean = false;
+	private client: AudioSwitcherUtilClient = new AudioSwitcherUtilClient(32122);
 
 	// --- Utils Server ---
 
 	private utilsServerProcess: ChildProcess | null = null;
-	private client: Socket | null = null;
+	//private client: Socket | null = null;
 
 	private static readonly MsgDelimiter = "\0";
 
@@ -88,26 +46,28 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 
 			try {
 				const executablePath = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "audioSwitcherUtil", "AppAudioSwitcherUtility.exe");
+				streamDeck.logger.info("Launching utils server...");
 				this.utilsServerProcess = spawn(executablePath, ["--server"]);
-				this.utilsServerProcess.stdout?.on("data", (data) => {
-					const text = data.toString();
-					if(text.includes("Listening on port")) {
-						clearTimeout(timeout)
-						resolve();
-					}
+				this.utilsServerProcess.on("spawn", () => {
+					clearTimeout(timeout);
+					resolve();
 				});
+				this.utilsServerProcess.on("error", (err) => {
+					clearTimeout(timeout);
+					streamDeck.logger.error("Encountered error while launchin utils server: ", err);
+					reject(err);
+				})
 			}
 			catch (e) {
 				clearTimeout(timeout);
+				streamDeck.logger.error("timeout? or exception")
 				reject(e);
 			}
 		})
 	}
 
 	endUtilsServer() {
-		this.client?.write("close");
-		this.client?.end();
-		this.client = null;
+		this.client?.disconnect();
 
 		if(this.utilsServerProcess !== null) {
 			this.utilsServerProcess.kill();
@@ -118,143 +78,99 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 		if(this.utilsServerProcess == null) {
 			return false;
 		}
-		if(this.client == null) {
+		if(this.client == null || !this.client.isConnected()) {
 			return false;
 		}
 		return true;
 	}
 
+	async wait(ms: number = 500) {
+		return new Promise(r => setTimeout(r, ms));
+	}
+
 	async tryConnectToUtilsServer(skipLaunch: boolean = false): Promise<void> {
-		return new Promise<void>(async (resolve, reject) => {
-			if(this.isConnected())
-			{
-				resolve();
+		if (this.isConnected()) {
+        	return;
+		}
+
+		if (!skipLaunch) {
+			await this.tryLaunchUtilsServer();
+			await this.delay(500);
+		}
+
+		await this.tryConnectWithRetry(5, 500); // 5 attempts, 500ms delay
+	}
+
+	private delay(ms: number) {
+    	return new Promise(resolve => setTimeout(resolve, ms));
+	}
+
+	private async tryConnectWithRetry(maxRetries: number, delayMs: number): Promise<void> {
+		let lastError: any = null;
+
+		for (let attempt = 1; attempt <= maxRetries; attempt++) {
+			try {
+				streamDeck.logger.info(`Connecting (attempt ${attempt}/${maxRetries})`);
+
+				await this.client.connect();
+
+				streamDeck.logger.info("Connected successfully");
 				return;
 			}
+			catch (err) {
+				lastError = err;
+				streamDeck.logger.warn(`Connection attempt ${attempt} failed`);
 
-			const connectHandler = () => {
-				if(this.client !== null) {
-					this.client.end();
-					this.client = null;
-				}
-
-				this.client = new Socket();
-
-				let receiveBuffer = "";
-
-				this.client.on("data", (data) => {
-					receiveBuffer += data.toString("utf8");
-
-					let delimiterIndex;
-					while ((delimiterIndex = receiveBuffer.indexOf(SwitchAppAudioAction.MsgDelimiter)) !== -1) {
-						const message = receiveBuffer.slice(0, delimiterIndex);
-						this.messageReceived(message);
-						receiveBuffer = receiveBuffer.slice(delimiterIndex + 1);
-					}
-				})
- 
-				try {
-					this.client.connect(32122, "127.0.0.1", () => {
-						streamDeck.logger.info("Connected to Utils!");
-						resolve();
-					});
-				} catch (e) {
-					this.endUtilsServer();
-					reject(e);
+				if (attempt < maxRetries) {
+					await this.delay(delayMs);
 				}
 			}
-			
-			if(skipLaunch) {
-				connectHandler();
-			}
-			else 
-			{
-				this.tryLaunchUtilsServer().then(() => {
-					connectHandler();
-				}, (e) => {
-					reject(e);
-				});
-			}
-		});
+		}
+
+		// All attempts failed
+		throw lastError ?? new Error("Failed to connect to utils server");
 	}
 
-	async sendMessage(message: string) {
-		await this.tryConnectToUtilsServer(true);
-		if(this.client === undefined) {
-			streamDeck.logger.debug("Fail!");
-		}
-
-		const payload = message.endsWith(SwitchAppAudioAction.MsgDelimiter) ? message : message + SwitchAppAudioAction.MsgDelimiter;
-		streamDeck.logger.debug(`Sending Message: ${message}`);
-		this.client?.write(payload);
-	}
-
-	async messageReceived(message: string) {
-		streamDeck.logger.info(`Received message: ${message}`);
-
-		let response: Response;
-
-		try {
-			response = JSON.parse(message);
-		}
-		catch {
-			return;
-		}
-
-		switch (response.id) {
-			case "devices": {
-				await this.handleDevicesMessageReceived(response.payload as DevicesPayload);
-				break;
-			}
-			case "focused":
-			case "icon":
-			{
-				await this.handleFocusedMessageReceived(response.payload as FocusedPayload);
-				break;
-			}
-		}
-	}
-
-	async handleDevicesMessageReceived(devicesPayload: DevicesPayload) {
-		this.curDevices = devicesPayload.devices ?? [];
+	async handleDevicesMessageReceived(devicesPayload: UtilTypes.DevicesMessageResponse) {
+		this.curDevices = devicesPayload.Devices ?? [];
 		streamDeck.logger.info(devicesPayload);
 		// After receiving devices, immediately update process
-		await this.sendMessage("--get focused --icon");
+		this.client.send(UtilTypes.FocusedMessageRequest, { Icon: true });
 	}
 
-	async handleFocusedMessageReceived(focusedPayload: FocusedPayload) {
+	async handleFocusedMessageReceived(focusedPayload: UtilTypes.FocusedMessageResponse) {
 		if(focusedPayload === undefined) return;
 
-		const shouldUpdate = focusedPayload.processId !== this.processInfo?.processId 
-			|| focusedPayload.hasSession !== this.processInfo.hasSession 
-			|| focusedPayload.deviceId !== this.processInfo.deviceId 
-			|| (focusedPayload.processIconBase64 && focusedPayload.processIconBase64 != this.processInfo?.processIconBase64)
-			&& focusedPayload.processId !== 0 || this.forceProcessUpdate;
+		const shouldUpdate = focusedPayload.ProcessId !== this.processInfo?.ProcessId 
+			|| focusedPayload.HasSession !== this.processInfo.HasSession 
+			|| focusedPayload.DeviceId !== this.processInfo.DeviceId 
+			|| (focusedPayload.ProcessIconBase64 && focusedPayload.ProcessIconBase64 != this.processInfo?.ProcessIconBase64)
+			&& focusedPayload.ProcessId !== 0 || this.forceProcessUpdate;
 
 		if(shouldUpdate) {
 			this.forceProcessUpdate = false;
 			this.processInfo = {
-				processId: focusedPayload.processId,
-				processName: focusedPayload.processName,
-				deviceId: focusedPayload.deviceId,
-				hasSession: focusedPayload.hasSession,
+				ProcessId: focusedPayload.ProcessId,
+				ProcessName: focusedPayload.ProcessName,
+				DeviceId: focusedPayload.DeviceId,
+				HasSession: focusedPayload.HasSession,
 				// icon is only sent when the process changes, updates do not include it, so make sure to preserve the icon when updates for the process come in
-				processIconBase64: this.processInfo?.processId == focusedPayload.processId && !focusedPayload.processIconBase64 ? this.processInfo.processIconBase64 : focusedPayload.processIconBase64
+				ProcessIconBase64: this.processInfo?.ProcessId == focusedPayload.ProcessId && !focusedPayload.ProcessIconBase64 ? this.processInfo.ProcessIconBase64 : focusedPayload.ProcessIconBase64
 			};
 
 			for (const action of this.actions) {
-				action.setTitle(this.processInfo.processName);
+				action.setTitle(this.processInfo.ProcessName);
 				if(action.isDial())
 				{
-					if(this.processInfo.deviceId !== '') {
-						await this.trySetCurSelectedDeviceId(action, this.processInfo.deviceId);
+					if(this.processInfo.DeviceId !== '') {
+						await this.trySetCurSelectedDeviceId(action, this.processInfo.DeviceId);
 					}
 
 					this.updateDialLayout(action).then();
 
-					if(focusedPayload.processIconBase64 !== undefined) {
+					if(focusedPayload.ProcessIconBase64 !== undefined) {
 						action.setFeedback({
-							icon: `data:image/png;base64,${focusedPayload.processIconBase64}`
+							icon: `data:image/png;base64,${focusedPayload.ProcessIconBase64}`
 						}).then()
 					}
 				}
@@ -262,22 +178,13 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 		}
 	}
 
-	async execAwait(cmd: string): Promise<{ error: ExecException|null; stdout: string; stderr: string }> 
-	{ 
-		return new Promise((resolve) => { 
-			exec(cmd, (error, stdout, stderr) => { 
-				resolve({ error, stdout, stderr }); 
-			}); 
-		}); 
-	}
-
 	private async updateDialLayout(action: DialAction<SoundSwitchSettings>) {
 		// Update 
 		const deviceInfo = await this.getCurDeviceForAction(action);
 
-		if(this.processInfo?.hasSession || this.processInfo?.deviceId !== "") {
+		if(this.processInfo?.HasSession || this.processInfo?.DeviceId !== "") {
 			await action.setFeedback({
-				value: deviceInfo?.Name.toString() ?? "None",
+				value: deviceInfo?.DeviceName.toString() ?? "None",
 			});
 		}
 		else {
@@ -287,17 +194,17 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 		}
 	}
 
-	private async getActionDeviceData(action: DialAction<SoundSwitchSettings> | KeyAction<SoundSwitchSettings>, filter: DeviceState = DeviceState.MASK_ALL): Promise<ActionDeviceInfo|null>
+	private async getActionDeviceData(action: DialAction<SoundSwitchSettings> | KeyAction<SoundSwitchSettings>, filter: UtilTypes.DeviceState = UtilTypes.DeviceState.MASK_ALL): Promise<UtilTypes.ActionDeviceInfo|null>
 	{
 		if(action === undefined) return null;
 		const settings = await action?.getSettings();
 		if(settings === undefined) return null;
-		const devicesForAction = this.curDevices.filter((d) => settings.activeDevices?.includes(d.Id) && d.State & filter);
-		let deviceIndex = devicesForAction.findIndex((d) => (d.Id === settings.curSelectedDeviceId));
+		const devicesForAction = this.curDevices.filter((d) => settings.activeDevices?.includes(d.DeviceId) && d.State & filter);
+		let deviceIndex = devicesForAction.findIndex((d) => (d.DeviceId === settings.curSelectedDeviceId));
 		return { settings: settings, devices: devicesForAction, curDeviceIdx: deviceIndex };
 	}
 
-	private async getCurDeviceForAction(action: DialAction<SoundSwitchSettings> | KeyAction<SoundSwitchSettings>): Promise<AudioDevice|undefined> {
+	private async getCurDeviceForAction(action: DialAction<SoundSwitchSettings> | KeyAction<SoundSwitchSettings>): Promise<UtilTypes.DeviceInfo|undefined> {
 		const actionDeviceInfo = await this.getActionDeviceData(action);
 		if(actionDeviceInfo === null) return undefined;
 
@@ -307,7 +214,7 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 			idx = 0;
 		}
 	
-		const deviceInfo = this.curDevices.find((d) => d.Id === actionDeviceInfo.devices[idx]?.Id);
+		const deviceInfo = this.curDevices.find((d) => d.DeviceId === actionDeviceInfo.devices[idx]?.DeviceId);
 		return deviceInfo;
 	}
 
@@ -315,7 +222,7 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 		let activationDeviceInfo = await this.getActionDeviceData(action);
 		if(activationDeviceInfo === null) return;
 
-		const device = activationDeviceInfo.devices.find((d) => d.Id === deviceId);
+		const device = activationDeviceInfo.devices.find((d) => d.DeviceId === deviceId);
 		if(device !== undefined) {
 			activationDeviceInfo.settings.curSelectedDeviceId = deviceId;
 			await action.setSettings(activationDeviceInfo.settings);
@@ -323,7 +230,7 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 	}
 
 	private async cycleDeviceIndexForAction(action: DialAction<SoundSwitchSettings> | KeyAction<SoundSwitchSettings>, incr: boolean) {
-		let actionDeviceInfo = await this.getActionDeviceData(action, DeviceState.ACTIVE);
+		let actionDeviceInfo = await this.getActionDeviceData(action, UtilTypes.DeviceState.ACTIVE);
 		if(actionDeviceInfo === null) return;
 		if(actionDeviceInfo.devices.length == 0) {
 			streamDeck.logger.info("No devices to switch to!");
@@ -339,7 +246,7 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 			idx = 0;
 		}
 
-		actionDeviceInfo.settings.curSelectedDeviceId = actionDeviceInfo.devices[idx].Id;
+		actionDeviceInfo.settings.curSelectedDeviceId = actionDeviceInfo.devices[idx].DeviceId;
 		await action.setSettings(actionDeviceInfo.settings);
 	}
 
@@ -349,19 +256,28 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 	 * we're setting the title to the "count" that is incremented in {@link SwitchAppAudioAction.onKeyDown}.
 	 */
 	override async onWillAppear(ev: WillAppearEvent<SoundSwitchSettings>): Promise<void> {
+		streamDeck.logger.info("onWillAppear");
 		try {
 			await this.tryConnectToUtilsServer();
+
+			this.client.on(UtilTypes.DevicesMessageResponse, (payload) => {
+				this.handleDevicesMessageReceived(payload);
+			});
+
+			this.client.on(UtilTypes.FocusedMessageResponse, (payload) => {
+				this.handleFocusedMessageReceived(payload);
+			});
 		}
 		catch (e) {
+			streamDeck.logger.error("Some error occurred")
 			streamDeck.logger.error(e);
 			return;
 		}
 
-		this.sendMessage("Bla bla bla");
-		this.sendMessage("--get devices");
+		this.client.send(UtilTypes.DevicesMessageRequest, { DataFlow: UtilTypes.DataFlow.eRender });
 		// Make sure the next process update will be applied, otherwise icon won't be set properly
 		this.forceProcessUpdate = true;
-		this.sendMessage("--get focused --icon");
+		this.client.send(UtilTypes.FocusedMessageRequest, { Icon: true });
 	}
 
 	override onWillDisappear(ev: WillDisappearEvent<SoundSwitchSettings>): Promise<void> | void {
@@ -397,9 +313,8 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 	override async onDialDown(ev: DialDownEvent<SoundSwitchSettings>): Promise<void> {
 		const device = await this.getCurDeviceForAction(ev.action);
 		if(device) {
-			const res = await this.execAwait(`audioSwitcherUtil\\AppAudioSwitcherUtility.exe --set appDevice --process ${this.processInfo?.processId} --device ${device.Id}`);
-			if(res.error) {
-				streamDeck.logger.error(res.error);
+			if(this.processInfo) {
+				this.client.send(UtilTypes.SetAppDeviceMessageRequest, { ProcessId: this.processInfo.ProcessId, DeviceId: device.DeviceId });
 			}
 		}
 	}
@@ -435,11 +350,11 @@ export class SwitchAppAudioAction extends SingletonAction<SoundSwitchSettings> {
 	}
 
 	#getAvailableDevices(showInactive: boolean): DataSourceResult {
-		const devices = showInactive ? this.curDevices : this.curDevices.filter((d) => d.State & DeviceState.ACTIVE);
+		const devices = showInactive ? this.curDevices : this.curDevices.filter((d) => d.State & UtilTypes.DeviceState.ACTIVE);
 		let array = devices.map((device) => 
 			({ 
-				value: device.Id,
-			 	label: showInactive ? `${device.Name} - ${DeviceState[device.State]}` : device.Name
+				value: device.DeviceId,
+			 	label: showInactive ? `${device.DeviceName} - ${UtilTypes.DeviceState[device.State]}` : device.DeviceName
 			}))
 		return array;
 	}

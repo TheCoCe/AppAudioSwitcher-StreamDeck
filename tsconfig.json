@@ -7,7 +7,7 @@
 		"module": "ES2022",
 		"moduleResolution": "Bundler",
 		"noImplicitOverride": true,
-		"types": [ "node" ]
+		"types": [ "node", "ws" ],
 	},
 	"include": [
 		"src/**/*.ts"
