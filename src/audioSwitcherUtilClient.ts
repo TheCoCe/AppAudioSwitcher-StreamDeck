@@ -20,39 +20,66 @@ export class AudioSwitcherUtilClient {
 
     constructor(private port: number) {}
 
-    connect(timeoutMs = 5000): Promise<NodeWebSocket> {
-        return new Promise((resolve, reject) => {
-            const socket = new NodeWebSocket(`ws://localhost:${this.port}/ws/`);
-            streamDeck.logger.info(socket.url);
-            
-            let timeoutHandle = setTimeout(() => {
-                streamDeck.logger.info("Timeout");
-                this.socket?.close();
-                reject(new Error("Connection to utils server timed out"));
-            }, timeoutMs);
+    private delay(ms: number) {
+    	return new Promise(resolve => setTimeout(resolve, ms));
+	}
 
-            socket.onopen = () => {
-                clearTimeout(timeoutHandle);
-                this.socket = socket;
-                streamDeck.logger.info("Connected to utils server");
-                resolve(socket);
+    async connect(maxRetries = 5, retryTimeoutMs = 500): Promise<NodeWebSocket|null> {
+         let lastError: any = null;
+        
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                streamDeck.logger.info(`Connecting (attempt ${attempt}/${maxRetries})`);
+                await this.connectInternal(retryTimeoutMs);
+                streamDeck.logger.info("Connected successfully");
+                return this.socket;
             }
+            catch (err) {
+                lastError = err;
+                if (attempt < maxRetries) {
+                    await this.delay(500);
+                }
+            }
+        }
+
+        throw lastError ?? new Error("Failed to connect to utils server");
+    }
+
+    private async connectInternal(timeoutMs = 500): Promise<NodeWebSocket> {
+        const socket = new NodeWebSocket(`ws://localhost:${this.port}/ws/`);
+
+        const connectPromise = new Promise<NodeWebSocket>((resolve, reject) => {
+            socket.onopen = () => resolve(socket);
 
             socket.onerror = (err) => {
-                clearTimeout(timeoutHandle);
-                streamDeck.logger.error("Received error", err.error);
-                reject(new Error("Websocket connection failed"));
-            }
-            
-            socket.onmessage = (ev) => {
-                const msg = JSON.parse(ev.data.toString()) as PluginMessage;
-                streamDeck.logger.info("Received message: ", msg);
+                reject(new Error("WebSocket connection failed: " + err.message));
+            };
+        });
+
+        let timeoutHandle: NodeJS.Timeout;
+        const timeoutPromise = new Promise<NodeWebSocket>((_, reject) => {
+            timeoutHandle = setTimeout(() => {
+                streamDeck.logger.error("Timeout event");
+                socket.close();
+                reject(new Error("Connection to utils server timed out"));
+            }, timeoutMs);
+        });
+
+        return Promise.race([connectPromise, timeoutPromise]).then(ws => {
+            clearTimeout(timeoutHandle);
+
+            ws.onmessage = (ev) => {
+                const msg = JSON.parse(ev.data.toString());
                 this.dispatch(msg);
-            }
-            
-            socket.onclose = (ev) => {
+            };
+
+            ws.onclose = (ev) => {
                 streamDeck.logger.info("Closed connection with utils server", ev.code);
-            }
+            };
+
+            this.socket = ws;
+            streamDeck.logger.info("Connected to utils server");
+            return ws;
         });
     }
 
@@ -95,6 +122,7 @@ export class AudioSwitcherUtilClient {
         const handlers = this.listeners.get(msg.Type);
         if(!handlers) return;
 
+        streamDeck.logger.info("Received message: ", msg);
         for (const { ctor, cb } of handlers) {
             cb(Object.assign(new ctor(), msg.Payload));
         }
